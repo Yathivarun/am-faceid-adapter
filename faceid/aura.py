@@ -13,6 +13,9 @@ class Aura:
         from insightface.app import FaceAnalysis
 
         pack = Path(pack_dir)
+        if not (pack / "glintr100.onnx").is_file():
+            # Fail here: insightface would otherwise try to download the pack
+            raise FileNotFoundError(f"AuraFace-v1 pack not found at {pack} (needs glintr100.onnx, scrfd, genderage)")
         if pack.parent.name != "models":
             # FaceAnalysis reads <root>/models/<name>
             raise ValueError(f"AuraFace pack must sit in a folder named 'models': {pack}")

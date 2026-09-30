@@ -3,6 +3,9 @@
     python prep/build_dataset.py --parquet "data/raw/ffhq512/*.parquet" --images data/raw/celebahq \
         --out data/faces [--limit 200] [--gpu]
 
+AuraFace comes from --aura, else from the config's paths.aura (--config,
+default configs/poc.yaml; on the GPU box pass --config configs/gpu.yaml).
+
 Inputs: parquet shards with an `image` column (bytes or {"bytes": ...}) and
 an optional `text` caption column (FFHQ-512-caption), and/or image folders
 (CelebA-HQ JPGs, official FFHQ 1024 PNGs; every image is resized to --size).
@@ -80,8 +83,8 @@ def main():
     ap.add_argument("--parquet", help="glob of parquet shards (image [+ text] columns)")
     ap.add_argument("--images", action="append", default=[], help="image folder (repeatable)")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--aura", default=str(Path(__file__).resolve().parents[2] / "am-ml-fullbody-sketch" / "dev"
-                                          / "models" / "AuraFace-v1"), help="AuraFace-v1 pack directory")
+    ap.add_argument("--config", default="configs/poc.yaml", help="source of paths.aura (the default)")
+    ap.add_argument("--aura", help="AuraFace-v1 pack directory (overrides the config)")
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--min-det", type=float, default=0.6)
     ap.add_argument("--min-face-frac", type=float, default=0.15, help="face box side / image side")
@@ -100,6 +103,13 @@ def main():
         if len(embeds) != len(done):
             raise SystemExit(f"{meta_path} and {emb_path} disagree ({len(done)} vs {len(embeds)}); rebuild")
 
+    if not args.aura:
+        import yaml
+        root = Path(__file__).resolve().parent.parent
+        cfg_path = Path(args.config) if Path(args.config).is_absolute() else root / args.config
+        aura_path = Path(yaml.safe_load(cfg_path.read_text())["paths"]["aura"])
+        args.aura = str(aura_path if aura_path.is_absolute() else (root / aura_path).resolve())
+    print(f"AuraFace: {args.aura}")
     aura = Aura(args.aura, gpu=args.gpu)
     sources = []
     if args.parquet:

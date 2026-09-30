@@ -1,0 +1,38 @@
+# Research PoC: AuraFace identity adapter, SD1.5, 3090 Ti (24 GB)
+paths:
+  sd15: ../am-ml-fullbody-sketch/dev/models/stable-diffusion-v1-5
+  aura: ../am-ml-fullbody-sketch/dev/models/AuraFace-v1
+  ip_adapter_dir: ../am-ml-fullbody-sketch/dev/models/ip_adapter      # h94 full-face / plus-face (eval baselines)
+  image_encoder: ../am-ml-fullbody-sketch/dev/models/image_encoder    # CLIP ViT-H for the baselines
+  data: data/faces
+  out: checkpoints/poc
+
+adapter:
+  num_tokens: 4
+  mult: 2              # 512 -> 1024 hidden (h94 FaceID SD1.5)
+
+train:
+  resolution: 512
+  batch_size: 8
+  grad_accum: 1
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_steps: 50000     # ~7-8 h on a 3090 Ti; extend to 150k if the curve is still improving
+  mixed_precision: fp16
+  grad_checkpointing: true
+  use_8bit_adam: true  # needs bitsandbytes; falls back to AdamW if missing
+  drop_text: 0.05
+  drop_id: 0.05
+  drop_both: 0.05
+  num_workers: 4
+  seed: 42
+  log_every: 50
+  save_every: 2500
+  val_every: 2500
+
+val:
+  num_faces: 8         # held-out ("val" split) faces rendered at each validation
+  steps: 30
+  guidance: 5.0
+  prompt: "a photo of a person, high quality"
+  negative: "blurry, lowres, deformed face"

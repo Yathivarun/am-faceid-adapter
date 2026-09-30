@@ -1,0 +1,20 @@
+# AuraFace identity adapter (Python 3.10, CUDA 12.1).
+# GPU box: use the offline master venv (AM/linux-wheelhouse, bash install.sh master), which already
+# has everything below except bitsandbytes, pyarrow and pyyaml; add those three as extra wheels.
+torch==2.2.0            # +cu121, from https://download.pytorch.org/whl/cu121
+torchvision==0.17.0
+diffusers==0.29.2
+transformers==4.38.2
+accelerate==0.27.2
+safetensors==0.7.0
+huggingface-hub==0.36.2
+insightface==0.7.3      # AuraFace runtime (build with CC=gcc CXX=g++ on the box)
+onnxruntime==1.16.3
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pillow==10.2.0
+
+bitsandbytes==0.43.1    # 8-bit AdamW (Linux); optional, falls back to torch AdamW
+pyarrow==17.0.0         # FFHQ parquet shards
+pyyaml==6.0.3
+pytest==8.3.4

@@ -235,7 +235,16 @@ def main():
         accel.print(f"interrupted at step {step}; saving before exit")
         if step and not (out_dir / f"state-{step:07d}").exists():
             checkpoint(step)
-        accel.print(f"paused. continue with: python train.py --config {args.config} --resume latest")
+        argv, skip = [], False                 # the same command, with --resume latest
+        for a in sys.argv[1:]:
+            if skip:
+                skip = False
+                continue
+            if a == "--resume":
+                skip = True
+                continue
+            argv.append(a)
+        accel.print("paused. continue with: python train.py " + " ".join(argv + ["--resume", "latest"]))
         return
     accel.print("training finished")
 

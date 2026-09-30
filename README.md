@@ -31,4 +31,20 @@ python eval.py --config configs/poc.yaml --adapter checkpoints/poc/step-50000/fa
 python -m pytest tests -q
 ```
 
+### Pause / resume
+
+- **Ctrl+C = pause:** it saves the current step (adapter + full training state) and exits.
+- `python train.py --config configs/poc.yaml --resume latest` continues from the newest saved state, with the optimiser, fp16 scaler and random-number state restored. `--resume checkpoints/poc/state-XXXXXXX` resumes from a specific state.
+- It also saves automatically every `save_every` steps (2,500). Only the newest `keep_states` (2) resumable states are kept, while every `step-XXXXXXX/faceid_aura_sd15.safetensors` (~46 MB, for inference) is kept.
+
+### Time and storage (3090 Ti, SD1.5)
+
+| | |
+|---|---|
+| Dataset build (~100k faces, AuraFace on CPU) | ~4–8 h, resumable |
+| Training, 50k steps at batch 8 | ~7–11 h (150k: ~21–32 h) |
+| Disk: raw FFHQ-512 parquet + CelebA-HQ | ~30 GB (deletable after the build) |
+| Disk: built dataset + checkpoints + 2 states | ~10–11 GB |
+| **Free space to plan for** | **~60–70 GB** (with buffer); ~20–25 GB once raw data is deleted |
+
 **Go/no-go:** mean AuraFace cosine on held-out faces clearly above full-face and plus-face at the same seeds and prompts, and visibly better likeness in the face-inpaint lab's pose mode.

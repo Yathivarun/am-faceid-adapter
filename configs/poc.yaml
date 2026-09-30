@@ -29,6 +29,7 @@ train:
   log_every: 50
   save_every: 2500
   val_every: 2500
+  keep_states: 2       # resumable states kept on disk (older ones deleted)
 
 val:
   num_faces: 8         # held-out ("val" split) faces rendered at each validation

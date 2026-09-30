@@ -12,6 +12,7 @@ sheet, and scored with AuraFace (mean cosine to the source face).
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,12 @@ def load_config(path, overrides, paths=None):
         p = Path(v)
         cfg["paths"][k] = str(p if p.is_absolute() else (ROOT / p).resolve())
     return cfg
+
+
+def latest_state(out_dir: Path):
+    """Newest resumable state folder (state-XXXXXXX), or None."""
+    states = sorted(Path(out_dir).glob("state-*"))
+    return states[-1] if states else None
 
 
 def build_models(sd15, dtype, device):
@@ -163,53 +170,73 @@ def main():
 
     step = 0
     if args.resume:
-        accel.load_state(args.resume)
-        step = int(Path(args.resume).name.split("-")[-1])
-        accel.print(f"resumed from {args.resume} at step {step}")
+        state = latest_state(out_dir) if args.resume == "latest" else Path(args.resume)
+        if state is None:
+            accel.print(f"no saved state in {out_dir}; starting from scratch")
+        else:
+            accel.load_state(str(state))
+            step = int(state.name.split("-")[-1])
+            accel.print(f"resumed from {state} at step {step}")
+
+    def checkpoint(step):
+        """Adapter weights (for inference) + full resumable state; prune old states."""
+        if not accel.is_main_process:
+            return
+        ckpt = out_dir / f"step-{step:07d}"
+        save_adapter(unet, ckpt / WEIGHT_NAME)
+        accel.save_state(str(out_dir / f"state-{step:07d}"))
+        for old in sorted(out_dir.glob("state-*"))[:-t.get("keep_states", 2)]:
+            shutil.rmtree(old, ignore_errors=True)
+        accel.print(f"saved step {step}: {ckpt / WEIGHT_NAME}")
 
     unet.train()
     t0, running = time.time(), 0.0
-    while step < t["max_steps"]:
-        for batch in dl:
-            with accel.accumulate(adapter):
-                with torch.no_grad():
-                    lat = vae.encode(batch["pixel_values"].to(dtype)).latent_dist.sample() * vae.config.scaling_factor
-                    enc = text(batch["input_ids"])[0]
-                noise = torch.randn_like(lat)
-                ts = torch.randint(0, sched.config.num_train_timesteps, (lat.shape[0],), device=lat.device)
-                noisy = sched.add_noise(lat, noise, ts)
-                target = noise if sched.config.prediction_type == "epsilon" else sched.get_velocity(lat, noise, ts)
-                with accel.autocast():
-                    pred = unet(noisy, ts, encoder_hidden_states=enc,
-                                added_cond_kwargs={"image_embeds": id_embeds(batch["id_embed"].to(dtype))}).sample
-                loss = F.mse_loss(pred.float(), target.float())
-                accel.backward(loss)
-                if accel.sync_gradients:
-                    accel.clip_grad_norm_(adapter.parameters(), 1.0)
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-            if not accel.sync_gradients:
-                continue
-            step += 1
-            running += loss.item()
-            if step % t["log_every"] == 0:
-                rate = t["log_every"] / (time.time() - t0)
-                eta = (t["max_steps"] - step) / max(rate, 1e-9) / 3600
-                accel.print(f"step {step}/{t['max_steps']}  loss {running / t['log_every']:.4f}  "
-                            f"{rate:.2f} it/s  eta {eta:.1f} h")
-                t0, running = time.time(), 0.0
-            if accel.is_main_process and (step % t["save_every"] == 0 or step == t["max_steps"]):
-                ckpt = out_dir / f"step-{step:07d}"
-                save_adapter(unet, ckpt / WEIGHT_NAME)
-                accel.save_state(str(out_dir / f"state-{step:07d}"))
-                accel.print(f"saved {ckpt / WEIGHT_NAME}")
-            if (not args.no_val and accel.is_main_process
-                    and (step % t["val_every"] == 0 or step == t["max_steps"])):
-                unet.eval()
-                validate(cfg, accel, tok, text, vae, unet, step, out_dir, dtype)
-                unet.train()
-            if step >= t["max_steps"]:
-                break
+    try:
+        while step < t["max_steps"]:
+            for batch in dl:
+                with accel.accumulate(adapter):
+                    with torch.no_grad():
+                        lat = vae.encode(batch["pixel_values"].to(dtype)).latent_dist.sample()                             * vae.config.scaling_factor
+                        enc = text(batch["input_ids"])[0]
+                    noise = torch.randn_like(lat)
+                    ts = torch.randint(0, sched.config.num_train_timesteps, (lat.shape[0],), device=lat.device)
+                    noisy = sched.add_noise(lat, noise, ts)
+                    target = noise if sched.config.prediction_type == "epsilon" else sched.get_velocity(lat, noise, ts)
+                    with accel.autocast():
+                        pred = unet(noisy, ts, encoder_hidden_states=enc,
+                                    added_cond_kwargs={"image_embeds": id_embeds(batch["id_embed"].to(dtype))}).sample
+                    loss = F.mse_loss(pred.float(), target.float())
+                    accel.backward(loss)
+                    if accel.sync_gradients:
+                        accel.clip_grad_norm_(adapter.parameters(), 1.0)
+                    opt.step()
+                    opt.zero_grad(set_to_none=True)
+                if not accel.sync_gradients:
+                    continue
+                step += 1
+                running += loss.item()
+                if step % t["log_every"] == 0:
+                    rate = t["log_every"] / (time.time() - t0)
+                    eta = (t["max_steps"] - step) / max(rate, 1e-9) / 3600
+                    accel.print(f"step {step}/{t['max_steps']}  loss {running / t['log_every']:.4f}  "
+                                f"{rate:.2f} it/s  eta {eta:.1f} h")
+                    t0, running = time.time(), 0.0
+                if step % t["save_every"] == 0 or step == t["max_steps"]:
+                    checkpoint(step)
+                if (not args.no_val and accel.is_main_process
+                        and (step % t["val_every"] == 0 or step == t["max_steps"])):
+                    unet.eval()
+                    validate(cfg, accel, tok, text, vae, unet, step, out_dir, dtype)
+                    unet.train()
+                if step >= t["max_steps"]:
+                    break
+    except KeyboardInterrupt:
+        # Ctrl+C = pause: save where we are, then exit; continue with --resume latest
+        accel.print(f"interrupted at step {step}; saving before exit")
+        if step and not (out_dir / f"state-{step:07d}").exists():
+            checkpoint(step)
+        accel.print(f"paused. continue with: python train.py --config {args.config} --resume latest")
+        return
     accel.print("training finished")
 
 

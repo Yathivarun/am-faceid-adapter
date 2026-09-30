@@ -24,6 +24,14 @@ class Aura:
                                 allowed_modules=["detection", "recognition", "genderage"],
                                 providers=providers)
         self.app.prepare(ctx_id=0 if gpu else -1, det_size=(det_size, det_size))
+        if gpu:
+            # onnxruntime falls back to CPU silently when its CUDA build doesn't
+            # match the machine's CUDA; with gpu=True that must be an error.
+            used = {name: m.session.get_providers()[0] for name, m in self.app.models.items()}
+            off = [name for name, p in used.items() if p != "CUDAExecutionProvider"]
+            if off:
+                raise RuntimeError(f"AuraFace asked for GPU but runs on CPU for {off}: onnxruntime-gpu "
+                                   f"does not match this CUDA (e.g. Colab CUDA 12 needs onnxruntime-gpu==1.22.0)")
 
     def faces(self, bgr: np.ndarray):
         """All faces, largest first."""

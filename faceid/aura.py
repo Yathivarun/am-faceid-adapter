@@ -33,9 +33,20 @@ class Aura:
                 raise RuntimeError(f"AuraFace asked for GPU but runs on CPU for {off}: onnxruntime-gpu "
                                    f"does not match this CUDA (e.g. Colab CUDA 12 needs onnxruntime-gpu==1.22.0)")
 
-    def faces(self, bgr: np.ndarray):
-        """All faces, largest first."""
-        found = self.app.get(bgr) or []
+    def faces(self, bgr: np.ndarray, pad: float = 0.25):
+        """All faces, largest first, in the coordinates of `bgr`.
+
+        The image is padded by `pad` x its size on every side before detection:
+        SCRFD misses faces that fill most of the frame (tight portrait crops
+        such as FFHQ / CelebA-HQ: 57% missed unpadded, 0% at 0.25 on a CelebA
+        sample). Boxes and keypoints are shifted back afterwards."""
+        p = int(round(pad * max(bgr.shape[:2]))) if pad else 0
+        img = cv2.copyMakeBorder(bgr, p, p, p, p, cv2.BORDER_CONSTANT, value=(0, 0, 0)) if p else bgr
+        found = self.app.get(img) or []
+        for f in found:
+            f.bbox = f.bbox - p
+            if getattr(f, "kps", None) is not None:
+                f.kps = f.kps - p
         return sorted(found, key=lambda f: -(f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
 
     def embed(self, bgr: np.ndarray):

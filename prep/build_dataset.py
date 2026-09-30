@@ -98,10 +98,23 @@ def main():
     meta_path, emb_path = out / "meta.jsonl", out / "embeds.npy"
     done, embeds = set(), []
     if meta_path.exists():
-        done = {json.loads(line)["id"] for line in meta_path.read_text().splitlines() if line}
+        lines = []
+        for line in meta_path.read_text().splitlines():
+            try:
+                lines.append(json.loads(line))
+            except ValueError:
+                break                           # a line cut off by a kill
         embeds = list(np.load(emb_path)) if emb_path.exists() else []
-        if len(embeds) != len(done):
-            raise SystemExit(f"{meta_path} and {emb_path} disagree ({len(done)} vs {len(embeds)}); rebuild")
+        n = min(len(lines), len(embeds))
+        if len(lines) != len(embeds):
+            # Killed between checkpoints: meta.jsonl and embeds.npy are saved at
+            # different moments. Keep the part both agree on; the rest is redone.
+            print(f"resume: meta has {len(lines)}, embeds {len(embeds)}; keeping the first {n}")
+            lines, embeds = lines[:n], embeds[:n]
+            meta_path.write_text("".join(json.dumps(m) + "\n" for m in lines))
+            np.save(emb_path, np.stack(embeds) if embeds else np.zeros((0, 512), np.float16))
+        done = {m["id"] for m in lines}
+        print(f"resume: {len(done)} faces already built")
 
     if not args.aura:
         import yaml

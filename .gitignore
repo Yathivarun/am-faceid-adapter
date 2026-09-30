@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.log
+
+# Data, weights, outputs: never in git
+data/
+checkpoints/
+outputs/
+*.safetensors
+*.bin
+*.parquet

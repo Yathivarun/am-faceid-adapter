@@ -8,7 +8,18 @@ Both datasets are **non-commercial / research-only**. They are used to prove tha
 | FFHQ 1024 (official, fallback) | 70,000 aligned faces, 1024 px PNG | https://github.com/NVlabs/ffhq-dataset (Google Drive, `download_ffhq.py --images`) | 89 GB | CC BY-NC-SA 4.0 |
 | **CelebA-HQ 512** (via CelebAMask-HQ) | 30,000 faces, 512 px JPG | https://github.com/switchablenorms/CelebAMask-HQ, Google Drive https://drive.google.com/open?id=1badu11NqxGf6qM3PTTooQDJvQbejgbTv (Baidu: https://pan.baidu.com/s/1wN1E-B1bJ7mE1mrn9loj5g) | ~3 GB | Non-commercial research only |
 
-## Downloading on a weak connection
+## What we actually use (tested)
+
+`prep/download_hf.py` lists the files through the Hugging Face API, resumes partial files, retries on drops, and skips finished ones. Re-run it until it reports everything complete:
+
+```bash
+python prep/download_hf.py --repo Ryan-sjtu/ffhq512-caption --folder data --out data/raw/ffhq512   # 54 shards, 27.1 GB
+python prep/download_hf.py --repo liusq/CelebAMask-HQ --folder "" --out data/raw/celebamask       # CelebAMask-HQ.zip, 3.15 GB
+```
+
+The official CelebAMask-HQ Google Drive link refuses scripted downloads (gdown fails on quota/permission), so we use the Hugging Face copy of the same zip. Unzip it and use `CelebAMask-HQ/CelebA-HQ-img/` (30,000 JPGs, 512 px).
+
+## Downloading on a weak connection (manual)
 
 The FFHQ parquet shards are independent (~0.5 GB each), so fetch them one at a time and resume failures. Use `curl -C -` or `huggingface-cli`:
 

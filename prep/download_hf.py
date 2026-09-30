@@ -28,14 +28,19 @@ def download(url, dest: Path, size: int, retries: int):
     part = dest.with_name(dest.name + ".part")
     for attempt in range(1, retries + 1):
         have = part.stat().st_size if part.exists() else 0
-        if have >= size:
+        if have == size:
             break
+        if have > size:                   # listed size is wrong: fetch again, trust the server
+            part.unlink()
+            have = 0
         req = urllib.request.Request(url, headers={"Range": f"bytes={have}-"} if have else {})
         try:
             with urllib.request.urlopen(req, timeout=60) as r, part.open("ab" if have else "wb") as out:
                 if have and r.status != 206:           # server ignored Range: start over
                     out.truncate(0)
                 t0, got = time.time(), 0
+                length = r.headers.get("Content-Length")
+                expected_end = (have if r.status == 206 else 0) + int(length) if length else None
                 for chunk in iter(lambda: r.read(CHUNK), b""):
                     out.write(chunk)
                     got += len(chunk)
@@ -44,6 +49,14 @@ def download(url, dest: Path, size: int, retries: int):
                         print(f"\r  {dest.name}: {done / 1e6:7.0f}/{size / 1e6:.0f} MB "
                               f"({got / 1e6 / (time.time() - t0):.1f} MB/s)", end="", flush=True)
                         t0, have, got = time.time(), done, 0
+            final = part.stat().st_size
+            if final != size and (expected_end is None or final == expected_end):
+                # The transfer finished cleanly but the API listed another size
+                # (small non-LFS files such as README.md, sometimes sent without a
+                # Content-Length): trust what the server sent.
+                print(f"\n  {dest.name}: API size {size} != served {final}; keeping the served file")
+                size = final
+                break
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
             print(f"\n  {dest.name}: attempt {attempt} failed ({e}); retrying in {min(60, 5 * attempt)} s")
             time.sleep(min(60, 5 * attempt))

@@ -69,6 +69,7 @@ def pipeline(cfg, mode, adapter, dtype, device):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="configs/poc.yaml")
+    ap.add_argument("--paths-from", help="take the paths section from this config (e.g. configs/gpu.yaml)")
     ap.add_argument("--adapter", help="our adapter .safetensors (needed for mode 'ours')")
     ap.add_argument("--modes", nargs="+", default=["ours", "full-face", "plus-face"],
                     choices=["ours", "full-face", "plus-face"])
@@ -82,7 +83,7 @@ def main():
     ap.add_argument("--out", help="output folder (overrides paths.out)")
     args = ap.parse_args()
 
-    cfg = load_config(args.config, {}, {"data": args.data, "out": args.out})
+    cfg = load_config(args.config, {}, {"data": args.data, "out": args.out}, args.paths_from)
     cfg["paths"].setdefault("ip_adapter_dir", str((ROOT / "../am-ml-fullbody-sketch/dev/models/ip_adapter").resolve()))
     cfg["paths"].setdefault("image_encoder", str((ROOT / "../am-ml-fullbody-sketch/dev/models/image_encoder").resolve()))
     if "ours" in args.modes and not args.adapter:

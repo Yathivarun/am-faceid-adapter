@@ -16,6 +16,9 @@ This is a research proof of concept: an **AuraFace-driven identity adapter for S
 | `train.py` | accelerate training loop, checkpoints, validation images + AuraFace score |
 | `eval.py` | Our adapter vs full-face / plus-face on held-out faces: AuraFace cosine + sheet |
 | `configs/poc.yaml` | Paths and hyper-parameters |
+| `configs/commercial.yaml` | Recipe v2 on SFHQ-T2I (inherits `poc.yaml`) |
+| `prep/verify_sfhq.py` | Checks the SFHQ-T2I zip: CRCs, CSV ↔ images, per-model counts, AuraFace sample |
+| `prep/diversity.py` | Identity spread / near-duplicates; optional `exclude.txt` |
 
 ## Environment
 
@@ -48,3 +51,25 @@ python -m pytest tests -q
 | **Free space to plan for** | **~60–70 GB** (with buffer); ~20–25 GB once raw data is deleted |
 
 **Go/no-go:** mean AuraFace cosine on held-out faces clearly above full-face and plus-face at the same seeds and prompts, and visibly better likeness in the face-inpaint lab's pose mode.
+
+## Commercial path (branch `commercial`)
+
+**Research result (`poc`, 50k steps on FFHQ + CelebA-HQ):**
+- Validation cosine reached 0.52, and photo-prompt identity was close to full-face.
+- Under a **sketch prompt** identity fell to ~0.38, against full-face's 0.55. In the lab's pose mode it tied plus-face on score but was weaker by eye, and raising `--ip-scale` barely changed anything.
+- Drawing quality was the best of the three.
+
+**Recipe v2** (`configs/commercial.yaml`, which inherits `poc.yaml`):
+- **Data:** SFHQ-T2I, synthetic and MIT-licensed, **FLUX.1-schnell + SDXL images only**, because the dev/pro/DALL-E 3 output terms forbid training competing models. See `data/raw/sfhq_t2i/SOURCE.md`. The generation prompts are used as captions.
+- **Sketch-domain samples:** `p_sketch: 0.3`. The target is a pencil rendering of the photo with a sketch caption; the identity vector stays the photo's.
+- **Identity tokens:** 16 instead of 4. diffusers infers the count from the weights.
+- **Validation:** scores a sketch prompt as well as the photo prompt.
+
+```bash
+python prep/verify_sfhq.py --zip data/raw/sfhq_t2i/download/archive.zip --report data/raw/sfhq_t2i/verify_report.json
+python prep/build_dataset.py --zip data/raw/sfhq_t2i/download/archive.zip \
+    --keep-models FLUX1_schnell SDXL --out data/faces_sfhq [--config configs/gpu.yaml]
+python prep/diversity.py data/faces_sfhq data/faces --dedupe 0.6 [--write-exclude]   # same-face check
+python train.py --config configs/commercial.yaml --paths-from configs/gpu.yaml --max-steps 15000   # pilot
+python train.py --config configs/commercial.yaml --paths-from configs/gpu.yaml --resume latest     # full run
+```

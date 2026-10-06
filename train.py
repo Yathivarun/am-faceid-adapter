@@ -33,8 +33,28 @@ from faceid.model import attach_adapter, id_embeds, save_adapter  # noqa: E402
 WEIGHT_NAME = "faceid_aura_sd15.safetensors"
 
 
-def load_config(path, overrides, paths=None):
-    cfg = yaml.safe_load(Path(path).read_text())
+def _read_config(path: Path) -> dict:
+    """A YAML config; `base: other.yaml` (relative to it) is loaded first and
+    this file's sections are merged over it, key by key."""
+    cfg = yaml.safe_load(path.read_text())
+    base = cfg.pop("base", None)
+    if not base:
+        return cfg
+    merged = _read_config(path.parent / base)
+    for section, values in cfg.items():
+        if isinstance(values, dict) and isinstance(merged.get(section), dict):
+            merged[section] = {**merged[section], **values}
+        else:
+            merged[section] = values
+    return merged
+
+
+def load_config(path, overrides, paths=None, paths_from=None):
+    """`paths_from`: take the `paths` section from another config (e.g. the GPU
+    box's gpu.yaml) so one training recipe runs on any machine."""
+    cfg = _read_config(Path(path))
+    if paths_from:
+        cfg["paths"] = {**cfg["paths"], **_read_config(Path(paths_from))["paths"]}
     for key, val in overrides.items():
         if val is not None:
             cfg["train"][key] = val
@@ -94,33 +114,42 @@ def validate(cfg, accel, tok, text, vae, unet, step, out_dir, dtype):
                                    requires_safety_checker=False)
     pipe.set_progress_bar_config(disable=True)
     aura = Aura(cfg["paths"]["aura"])
-    tiles, scores = [], []
+    # The photo prompt, plus a sketch prompt when configured: identity under a
+    # drawing style is what the sketch pipelines need, and what the photo-only
+    # research adapter lost.
+    prompts = {"photo": v["prompt"]}
+    if v.get("sketch_prompt"):
+        prompts["sketch"] = v["sketch_prompt"]
+    rows, scores = [], {k: [] for k in prompts}
     for m, row in val:
         pos = torch.from_numpy(np.asarray(embeds[row], np.float32)).to(accel.device, dtype)[None, None]
         embeds_cfg = [torch.cat([torch.zeros_like(pos), pos])]          # [negative, positive]
-        with accel.autocast():      # adapter weights are fp32, the frozen UNet fp16
-            img = pipe(v["prompt"], negative_prompt=v["negative"], num_inference_steps=v["steps"],
-                       guidance_scale=v["guidance"], ip_adapter_image_embeds=embeds_cfg, height=512, width=512,
-                       generator=torch.Generator(accel.device).manual_seed(0)).images[0]
-        src = Image.open(data / "images" / f"{m['id']}.jpg").convert("RGB").resize((256, 256))
-        tiles.append((src, img.resize((256, 256))))
-        gen_emb, _ = aura.embed(np.asarray(img)[:, :, ::-1].copy())
-        if gen_emb is not None:
-            scores.append(cosine(gen_emb, np.asarray(embeds[row], np.float32)))
-    sheet = Image.new("RGB", (256 * len(tiles), 512), "white")
-    for i, (src, gen) in enumerate(tiles):
-        sheet.paste(src, (256 * i, 0))
-        sheet.paste(gen, (256 * i, 256))
+        tiles = [Image.open(data / "images" / f"{m['id']}.jpg").convert("RGB").resize((256, 256))]
+        for kind, prompt in prompts.items():
+            with accel.autocast():      # adapter weights are fp32, the frozen UNet fp16
+                img = pipe(prompt, negative_prompt=v["negative"], num_inference_steps=v["steps"],
+                           guidance_scale=v["guidance"], ip_adapter_image_embeds=embeds_cfg, height=512,
+                           width=512, generator=torch.Generator(accel.device).manual_seed(0)).images[0]
+            tiles.append(img.resize((256, 256)))
+            gen_emb, _ = aura.embed(np.asarray(img)[:, :, ::-1].copy())
+            if gen_emb is not None:
+                scores[kind].append(cosine(gen_emb, np.asarray(embeds[row], np.float32)))
+        rows.append(tiles)
+    sheet = Image.new("RGB", (256 * len(rows), 256 * (1 + len(prompts))), "white")
+    for i, tiles in enumerate(rows):                 # columns = faces; rows = source, photo, sketch
+        for j, tile in enumerate(tiles):
+            sheet.paste(tile, (256 * i, 256 * j))
     sheet.save(out_dir / f"val_step{step:07d}.jpg", quality=90)
-    score = float(np.mean(scores)) if scores else float("nan")
-    accel.print(f"[val] step {step}: AuraFace cosine {score:.3f} over {len(scores)}/{len(val)} faces "
-                f"(sheet val_step{step:07d}.jpg)")
-    return score
+    means = {k: float(np.mean(s)) if s else float("nan") for k, s in scores.items()}
+    parts = "  ".join(f"{k} {means[k]:.3f} ({len(scores[k])}/{len(val)})" for k in prompts)
+    accel.print(f"[val] step {step}: AuraFace cosine {parts} (sheet val_step{step:07d}.jpg)")
+    return means["photo"]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/poc.yaml")
+    ap.add_argument("--paths-from", help="take the paths section from this config (e.g. configs/gpu.yaml)")
     ap.add_argument("--max-steps", type=int)
     ap.add_argument("--batch-size", type=int)
     ap.add_argument("--resume", help="state directory from a previous run (…/state-XXXXXXX)")
@@ -134,7 +163,7 @@ def main():
     cfg = load_config(args.config, {"max_steps": args.max_steps, "batch_size": args.batch_size,
                                     "val_every": args.val_every, "save_every": args.save_every,
                                     "num_workers": args.num_workers},
-                      {"data": args.data, "out": args.out})
+                      {"data": args.data, "out": args.out}, args.paths_from)
     t = cfg["train"]
 
     accel = Accelerator(mixed_precision=t["mixed_precision"], gradient_accumulation_steps=t["grad_accum"])
@@ -162,10 +191,11 @@ def main():
     opt = opt_cls(adapter.parameters(), lr=t["lr"], weight_decay=t["weight_decay"])
 
     ds = FaceDataset(cfg["paths"]["data"], tok, "train", t["resolution"], t["drop_text"], t["drop_id"],
-                     t["drop_both"])
+                     t["drop_both"], p_sketch=t.get("p_sketch", 0.0))
     dl = DataLoader(ds, batch_size=t["batch_size"], shuffle=True, num_workers=t["num_workers"],
                     drop_last=True, pin_memory=True, persistent_workers=t["num_workers"] > 0)
-    accel.print(f"train faces: {len(ds)}  batch {t['batch_size']} x accum {t['grad_accum']}")
+    accel.print(f"train faces: {len(ds)} (excluded {ds.excluded})  batch {t['batch_size']} x accum "
+                f"{t['grad_accum']}  tokens {cfg['adapter']['num_tokens']}  p_sketch {ds.p_sketch}")
     adapter, opt, dl = accel.prepare(adapter, opt, dl)
 
     step = 0

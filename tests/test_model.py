@@ -51,12 +51,18 @@ def test_saved_weights_use_h94_faceid_keys():
     assert ip == list(range(1, 2 * len(ip), 2))        # 1, 3, 5, ... one per cross-attention layer
 
 
-def test_round_trip_through_the_diffusers_loader(tmp_path):
-    """Weights saved by us, loaded by diffusers' own IP-Adapter loader, give the same output."""
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("num_tokens", [4, 16])
+def test_round_trip_through_the_diffusers_loader(tmp_path, num_tokens):
+    """Weights saved by us, loaded by diffusers' own IP-Adapter loader, give the
+    same output, for the 4-token research and the 16-token commercial adapter
+    (diffusers infers the token count from proj.2)."""
     from safetensors.torch import load_file
 
     trained = tiny_unet()
-    modules = attach_adapter(trained)
+    modules = attach_adapter(trained, num_tokens=num_tokens)
     with torch.no_grad():                             # make the adapter non-trivial
         for p in modules.parameters():
             p.add_(0.01 * torch.randn_like(p))

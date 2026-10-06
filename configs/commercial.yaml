@@ -1,0 +1,21 @@
+# Commercial path: SFHQ-T2I (synthetic, MIT; FLUX.1-schnell + SDXL subset only).
+# Recipe v2, from the research PoC's evaluation: identity collapsed under
+# sketch prompts, so train with sketch-domain samples and a wider identity
+# path. Everything not set here comes from poc.yaml.
+#
+# On the GPU box: --paths-from configs/gpu.yaml (model paths), plus --data/--out.
+base: poc.yaml
+
+paths:
+  data: data/faces_sfhq
+  out: checkpoints/commercial
+
+adapter:
+  num_tokens: 16       # was 4: more capacity for identity next to strong style text
+
+train:
+  max_steps: 50000     # ~8.5 h; pilot first with --max-steps 15000
+  p_sketch: 0.3        # share of samples rendered as pencil sketches (identity from the photo)
+
+val:
+  sketch_prompt: "a pencil sketch portrait of a person, monochrome drawing"

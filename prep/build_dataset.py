@@ -3,6 +3,11 @@
     python prep/build_dataset.py --parquet "data/raw/ffhq512/*.parquet" --images data/raw/celebahq \
         --out data/faces [--limit 200] [--gpu]
 
+    # SFHQ-T2I straight from the Kaggle zip (no extraction), licence-clean subset,
+    # the generation prompts as captions:
+    python prep/build_dataset.py --zip data/raw/sfhq_t2i/download/archive.zip \
+        --zip-csv SFHQ_T2I_dataset.csv --keep-models FLUX1_schnell SDXL --out data/faces_sfhq
+
 AuraFace comes from --aura, else from the config's paths.aura (--config,
 default configs/poc.yaml; on the GPU box pass --config configs/gpu.yaml).
 
@@ -14,7 +19,8 @@ Keeps an image only if AuraFace finds exactly one clear face (det score and
 face size above thresholds). Writes:
     <out>/images/<id>.jpg     square, --size px
     <out>/embeds.npy          float16 (N, 512), row i = meta line i
-    <out>/meta.jsonl          {"id", "src", "caption", "gender", "age", "det", "split"}
+    <out>/meta.jsonl          {"id", "src", "caption", "gender", "age", "det", "split"[, "model"]}
+("model" = the generator that made the image, for zip/CSV sources.)
 Split: ~2% of images go to "val" (held out, by a hash of the id).
 Resumable: re-running skips ids already in meta.jsonl.
 """
@@ -47,7 +53,7 @@ def _parquet_items(pattern):
         stem = Path(shard).stem.split("-of-")[0]
         for i, (img, text) in enumerate(zip(images, texts)):
             data = img["bytes"] if isinstance(img, dict) else img
-            yield f"ffhq_{stem}_{i:05d}", shard, data, text
+            yield f"ffhq_{stem}_{i:05d}", shard, data, text, None
 
 
 def _folder_items(folder, prefix):
@@ -57,7 +63,32 @@ def _folder_items(folder, prefix):
             # id from the path inside the folder: same file names in different
             # sub-folders must not collide
             rel = p.relative_to(root).with_suffix("").as_posix().replace("/", "__")
-            yield f"{prefix}_{rel}", str(p), p.read_bytes(), None
+            yield f"{prefix}_{rel}", str(p), p.read_bytes(), None, None
+
+
+def _zip_items(zip_path, csv_name, keep_models, image_col="image_filename", text_col="text_prompt",
+               model_col="model_used"):
+    """Images inside a zip, captioned by a CSV that is also inside it (SFHQ-T2I
+    layout). Only rows whose generator is in `keep_models` (all if empty).
+    Yields (id, src, bytes, caption, model)."""
+    import csv
+    import zipfile
+
+    zf = zipfile.ZipFile(zip_path)
+    names = {Path(n).name: n for n in zf.namelist() if Path(n).suffix.lower() in _EXT}
+    csv_member = next((n for n in zf.namelist() if Path(n).name == csv_name), None)
+    if csv_member is None:
+        raise FileNotFoundError(f"{csv_name} not in {zip_path}")
+    rows = list(csv.DictReader(io.TextIOWrapper(zf.open(csv_member), encoding="utf-8")))
+    keep = set(keep_models or [])
+    for row in sorted(rows, key=lambda r: r[image_col]):
+        if keep and row[model_col] not in keep:
+            continue
+        member = names.get(row[image_col])
+        if member is None:
+            continue
+        yield (f"sfhq_{Path(row[image_col]).stem}", f"{zip_path}:{member}", zf.read(member),
+               row[text_col], row[model_col])
 
 
 def _square(img: Image.Image, size: int) -> Image.Image:
@@ -82,6 +113,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--parquet", help="glob of parquet shards (image [+ text] columns)")
     ap.add_argument("--images", action="append", default=[], help="image folder (repeatable)")
+    ap.add_argument("--zip", help="zip of images with a captions CSV inside (SFHQ-T2I)")
+    ap.add_argument("--zip-csv", default="SFHQ_T2I_dataset.csv", help="captions CSV inside --zip")
+    ap.add_argument("--keep-models", nargs="*", default=[],
+                    help="only these generators (CSV model column); licence filter for --zip")
     ap.add_argument("--out", required=True)
     ap.add_argument("--config", default="configs/poc.yaml", help="source of paths.aura (the default)")
     ap.add_argument("--aura", help="AuraFace-v1 pack directory (overrides the config)")
@@ -129,11 +164,15 @@ def main():
         sources.append(_parquet_items(args.parquet))
     for i, folder in enumerate(args.images):
         sources.append(_folder_items(folder, f"img{i}"))
+    if args.zip:
+        sources.append(_zip_items(args.zip, args.zip_csv, args.keep_models))
+    if not sources:
+        ap.error("no source: give --parquet, --images and/or --zip")
 
     kept = rejected = 0
     with meta_path.open("a") as meta:
         for source in sources:
-            for item_id, src, data, text in source:
+            for item_id, src, data, text, gen_model in source:
                 if item_id in done:
                     continue
                 try:
@@ -153,9 +192,12 @@ def main():
                 embeds.append(f.normed_embedding.astype(np.float16))
                 gender = int(f.gender) if getattr(f, "gender", None) is not None else None
                 age = float(f.age) if getattr(f, "age", None) is not None else None
-                meta.write(json.dumps({"id": item_id, "src": src, "caption": _caption(text, gender, age),
-                                       "gender": gender, "age": age, "det": round(float(f.det_score), 3),
-                                       "split": _split(item_id, args.val_pct)}) + "\n")
+                record = {"id": item_id, "src": src, "caption": _caption(text, gender, age),
+                          "gender": gender, "age": age, "det": round(float(f.det_score), 3),
+                          "split": _split(item_id, args.val_pct)}
+                if gen_model:
+                    record["model"] = gen_model
+                meta.write(json.dumps(record) + "\n")
                 done.add(item_id)
                 kept += 1
                 if kept % 500 == 0:

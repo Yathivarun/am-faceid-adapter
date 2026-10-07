@@ -166,6 +166,8 @@ def main():
     ap.add_argument("--val-every", type=int)
     ap.add_argument("--save-every", type=int)
     ap.add_argument("--num-workers", type=int)
+    ap.add_argument("--generic-captions", action="store_true",
+                    help="train with fixed captions instead of the dataset's (or train.generic_captions)")
     args = ap.parse_args()
     cfg = load_config(args.config, {"max_steps": args.max_steps, "batch_size": args.batch_size,
                                     "val_every": args.val_every, "save_every": args.save_every,
@@ -198,11 +200,13 @@ def main():
     opt = opt_cls(adapter.parameters(), lr=t["lr"], weight_decay=t["weight_decay"])
 
     ds = FaceDataset(cfg["paths"]["data"], tok, "train", t["resolution"], t["drop_text"], t["drop_id"],
-                     t["drop_both"], p_sketch=t.get("p_sketch", 0.0))
+                     t["drop_both"], p_sketch=t.get("p_sketch", 0.0),
+                     generic_captions=args.generic_captions or t.get("generic_captions", False))
     dl = DataLoader(ds, batch_size=t["batch_size"], shuffle=True, num_workers=t["num_workers"],
                     drop_last=True, pin_memory=True, persistent_workers=t["num_workers"] > 0)
     accel.print(f"train faces: {len(ds)} (excluded {ds.excluded})  batch {t['batch_size']} x accum "
-                f"{t['grad_accum']}  tokens {cfg['adapter']['num_tokens']}  p_sketch {ds.p_sketch}")
+                f"{t['grad_accum']}  tokens {cfg['adapter']['num_tokens']}  p_sketch {ds.p_sketch}  "
+                f"captions {'generic' if ds.generic_captions else 'dataset'}")
     adapter, opt, dl = accel.prepare(adapter, opt, dl)
 
     step = 0

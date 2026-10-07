@@ -97,6 +97,24 @@ def test_sketch_samples_get_a_sketch_caption_and_keep_the_identity(tmp_path):
     assert float(item["id_embed"].sum()) == 512.0                 # identity is the photo's
 
 
+@pytest.mark.parametrize(("p_sketch", "expected"), [(0.0, "a photo of a person"), (1.0, " of a person")])
+def test_generic_captions_replace_the_dataset_caption(tmp_path, p_sketch, expected):
+    ds = FaceDataset(_dataset(tmp_path), _Tok(), size=32, drop_text=0, drop_id=0, drop_both=0,
+                     p_sketch=p_sketch, generic_captions=True)
+    ds[0]
+    assert _Tok.last.endswith(expected) and "face 0" not in _Tok.last
+
+
+def test_impostors_are_always_a_different_person():
+    import eval as ev
+
+    refs = ["p1/a", "p1/b", "p1/c", "p2/a", "p3/a"]
+    person = {r: r.split("/")[0] for r in refs}
+    imp = ev.impostors(refs, person)
+    assert all(person[imp[r]] != person[r] for r in refs)
+    assert ev.impostors(["p1/a", "p1/b"], {"p1/a": "p1", "p1/b": "p1"}) == {"p1/a": None, "p1/b": None}
+
+
 def test_exclude_file_removes_images(tmp_path):
     ds = FaceDataset(_dataset(tmp_path, exclude=("f1", "f3")), _Tok(), size=32)
     assert len(ds) == 2 and ds.excluded == 2

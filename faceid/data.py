@@ -13,6 +13,11 @@ tokens to survive a drawing style.
 
 An optional `exclude.txt` (one id per line, e.g. from prep/diversity.py's
 near-duplicate pass) removes images from training.
+
+generic_captions: replace every caption with a fixed one ("a photo of a
+person" / a sketch caption). SFHQ's captions are its generation prompts, which
+spell out age, ethnicity, expression and accessories; with them the text
+explains the face and the identity tokens have little left to learn.
 """
 
 import json
@@ -31,6 +36,7 @@ SKETCH_CAPTIONS = (
     "a monochrome hand-drawn sketch",
     "a black and white pencil drawing",
 )
+GENERIC_CAPTION = "a photo of a person"
 
 
 def pencil_sketch(img: Image.Image, rng: random.Random | None = None) -> Image.Image:
@@ -48,7 +54,7 @@ def pencil_sketch(img: Image.Image, rng: random.Random | None = None) -> Image.I
 
 class FaceDataset(Dataset):
     def __init__(self, root, tokenizer, split="train", size=512, drop_text=0.05, drop_id=0.05,
-                 drop_both=0.05, flip=True, p_sketch=0.0):
+                 drop_both=0.05, flip=True, p_sketch=0.0, generic_captions=False):
         root = Path(root)
         lines = [json.loads(line) for line in (root / "meta.jsonl").read_text().splitlines() if line]
         embeds = np.load(root / "embeds.npy", mmap_mode="r")
@@ -62,6 +68,7 @@ class FaceDataset(Dataset):
         self.drop = (drop_text, drop_id, drop_both)
         self.flip = flip
         self.p_sketch = p_sketch
+        self.generic_captions = generic_captions
 
     def __len__(self):
         return len(self.items)
@@ -73,10 +80,11 @@ class FaceDataset(Dataset):
             img = img.resize((self.size, self.size), Image.LANCZOS)
         if self.flip and random.random() < 0.5:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
-        caption = meta["caption"]
+        caption = GENERIC_CAPTION if self.generic_captions else meta["caption"]
         if self.p_sketch and random.random() < self.p_sketch:
             img = pencil_sketch(img)
-            caption = f"{random.choice(SKETCH_CAPTIONS)}. {caption}"
+            style = random.choice(SKETCH_CAPTIONS)
+            caption = f"{style} of a person" if self.generic_captions else f"{style}. {caption}"
         px = torch.from_numpy(np.asarray(img, np.float32) / 127.5 - 1.0).permute(2, 0, 1)
         emb = torch.from_numpy(np.asarray(self.embeds[row], np.float32))
         r = random.random()

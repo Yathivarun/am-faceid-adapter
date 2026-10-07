@@ -43,15 +43,33 @@ H94 = {"full-face": "ip-adapter-full-face_sd15.safetensors", "plus-face": "ip-ad
 PROMPTS = ["a photo of a person, high quality", "a pencil sketch portrait of a person, monochrome"]
 
 
-def references(cfg, refs, n_val):
-    out = []
+def references(cfg, refs, n_val, refs_mixed=False):
+    """(reference paths, person key per path). Each held-out dataset face is its
+    own person; every --refs folder is one person (e.g. mul_face/p1 = three
+    photos of the same visitor), unless refs_mixed: then every image is its own."""
+    out, person = [], {}
     data = Path(cfg["paths"]["data"])
     if n_val and (data / "meta.jsonl").exists():
         lines = [json.loads(line) for line in (data / "meta.jsonl").read_text().splitlines() if line]
-        out += [data / "images" / f"{m['id']}.jpg" for m in lines if m["split"] == "val"][:n_val]
+        for m in [m for m in lines if m["split"] == "val"][:n_val]:
+            p = data / "images" / f"{m['id']}.jpg"
+            out.append(p)
+            person[p] = f"val:{m['id']}"
     for folder in refs:
-        out += sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
-    return out
+        for p in sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}):
+            out.append(p)
+            person[p] = f"img:{p}" if refs_mixed else f"dir:{folder}"
+    return out, person
+
+
+def impostors(refs, person):
+    """For each reference, the next reference (cyclically) that is a different
+    person: scoring a generated face against it gives the chance level."""
+    imp = {}
+    for i, r in enumerate(refs):
+        imp[r] = next((refs[(i + k) % len(refs)] for k in range(1, len(refs))
+                       if person[refs[(i + k) % len(refs)]] != person[r]), None)
+    return imp
 
 
 _IMG = {".jpg", ".jpeg", ".png", ".webp"}
@@ -146,6 +164,11 @@ def main():
                     help="map reference vectors onto the training distribution (mode 'ours')")
     ap.add_argument("--align-src", help="real faces: dataset folder or photo folder (source statistics)")
     ap.add_argument("--align-tgt", help="training set folder (target statistics), e.g. data/faces_sfhq")
+    ap.add_argument("--shuffle-refs", action="store_true",
+                    help="also score each image against a DIFFERENT person (chance level); "
+                         "reports the margin = own - impostor")
+    ap.add_argument("--refs-mixed", action="store_true",
+                    help="treat every image under --refs as a different person (default: one folder = one person)")
     args = ap.parse_args()
     if args.align != "none" and not (args.align_src and args.align_tgt):
         raise SystemExit("--align needs --align-src and --align-tgt")
@@ -157,7 +180,7 @@ def main():
         raise SystemExit("--adapter is required for mode 'ours'")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
-    refs = references(cfg, args.refs, args.n_val)
+    refs, person = references(cfg, args.refs, args.n_val, args.refs_mixed)
     if not refs:
         raise SystemExit("no reference faces (build the dataset or pass --refs)")
 
@@ -168,6 +191,9 @@ def main():
         if e is not None:
             ref_emb[r] = e
     refs = list(ref_emb)
+    imp = impostors(refs, person) if args.shuffle_refs else {}
+    if args.shuffle_refs and not any(imp.values()):
+        raise SystemExit("--shuffle-refs needs references of at least two different people")
     align = lambda v: v  # noqa: E731
     if args.align != "none":
         src, tgt = vector_set(args.align_src, aura), vector_set(args.align_tgt, aura)
@@ -196,8 +222,14 @@ def main():
                                **kw).images[0]
                     e, _ = aura.embed(np.asarray(img)[:, :, ::-1].copy())
                     score = cosine(e, ref_emb[r]) if e is not None else None
-                    rows.append({"mode": mode, "ref": str(r), "prompt": pi, "seed": seed,
-                                 "score": None if score is None else round(score, 4)})
+                    row = {"mode": mode, "ref": str(r), "prompt": pi, "seed": seed,
+                           "score": None if score is None else round(score, 4)}
+                    if args.shuffle_refs:
+                        other = imp.get(r)
+                        row["impostor"] = str(other) if other else None
+                        row["impostor_score"] = (round(cosine(e, ref_emb[other]), 4)
+                                                 if e is not None and other is not None else None)
+                    rows.append(row)
                     if seed == 0:
                         images[(mode, r, pi)] = img
         del pipe
@@ -209,13 +241,26 @@ def main():
         w.writeheader()
         w.writerows(rows)
     summary = {}
+
+    def _mean(vals):
+        vals = [v for v in vals if v is not None]
+        return round(float(np.mean(vals)), 4) if vals else None
+
     for mode in args.modes:
-        s = [r["score"] for r in rows if r["mode"] == mode and r["score"] is not None]
-        n = sum(1 for r in rows if r["mode"] == mode)
-        summary[mode] = {"mean_cosine": round(float(np.mean(s)), 4) if s else None,
-                         "face_found": f"{len(s)}/{n}"}
+        mine = [r for r in rows if r["mode"] == mode]
+        s = [r["score"] for r in mine if r["score"] is not None]
+        summary[mode] = {"mean_cosine": _mean(s), "face_found": f"{len(s)}/{len(mine)}"}
+        for pi, name in enumerate(("photo", "sketch")[: len(PROMPTS)]):
+            part = [r for r in mine if r["prompt"] == pi]
+            entry = {"own": _mean(r["score"] for r in part)}
+            if args.shuffle_refs:
+                entry["impostor"] = _mean(r["impostor_score"] for r in part)
+                if entry["own"] is not None and entry["impostor"] is not None:
+                    entry["margin"] = round(entry["own"] - entry["impostor"], 4)
+            summary[mode][name] = entry
     summary["_settings"] = {"adapter": args.adapter, "align": args.align, "align_src": args.align_src,
-                            "align_tgt": args.align_tgt, "scale": args.scale}
+                            "align_tgt": args.align_tgt, "scale": args.scale,
+                            "shuffle_refs": args.shuffle_refs}
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     for pi in range(len(PROMPTS)):
         t = 192

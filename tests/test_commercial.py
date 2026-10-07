@@ -118,12 +118,14 @@ def test_config_base_and_paths_from(tmp_path):
         "train: {lr: 0.1, p_sketch: 0.0}\nval: {steps: 3}\n")
     (tmp_path / "child.yaml").write_text(
         "base: base.yaml\npaths: {data: d2}\nadapter: {num_tokens: 16}\ntrain: {p_sketch: 0.3}\n")
-    (tmp_path / "box.yaml").write_text("paths: {sd15: /box/sd}\n")
+    # the box config also names its own data/out: those must NOT leak into the recipe
+    (tmp_path / "box.yaml").write_text("paths: {sd15: /box/sd, data: research, out: poc}\n")
     cfg = load_config(tmp_path / "child.yaml", {}, None, tmp_path / "box.yaml")
     assert cfg["adapter"] == {"num_tokens": 16, "mult": 2}
     assert cfg["train"] == {"lr": 0.1, "p_sketch": 0.3}
     assert Path(cfg["paths"]["sd15"]).as_posix().endswith("/box/sd")      # resolve() adds C: on Windows
     assert Path(cfg["paths"]["data"]).name == "d2"
+    assert Path(cfg["paths"]["out"]).name == "o1"
 
 
 def test_commercial_config_loads():

@@ -49,12 +49,19 @@ def _read_config(path: Path) -> dict:
     return merged
 
 
+# Machine-specific model locations; the only paths --paths-from may supply.
+MODEL_PATH_KEYS = ("sd15", "aura", "ip_adapter_dir", "image_encoder")
+
+
 def load_config(path, overrides, paths=None, paths_from=None):
-    """`paths_from`: take the `paths` section from another config (e.g. the GPU
-    box's gpu.yaml) so one training recipe runs on any machine."""
+    """`paths_from`: take the MODEL paths (sd15, aura, ...) from another config,
+    e.g. the GPU box's gpu.yaml, so one training recipe runs on any machine.
+    The recipe's own `data` and `out` are never replaced by it: doing so once
+    trained the commercial recipe on the research data."""
     cfg = _read_config(Path(path))
     if paths_from:
-        cfg["paths"] = {**cfg["paths"], **_read_config(Path(paths_from))["paths"]}
+        other = _read_config(Path(paths_from))["paths"]
+        cfg["paths"].update({k: v for k, v in other.items() if k in MODEL_PATH_KEYS})
     for key, val in overrides.items():
         if val is not None:
             cfg["train"][key] = val

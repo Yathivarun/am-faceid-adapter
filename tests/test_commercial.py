@@ -128,6 +128,24 @@ def test_config_base_and_paths_from(tmp_path):
     assert Path(cfg["paths"]["out"]).name == "o1"
 
 
+@pytest.mark.parametrize("kind", ["mean", "coral"])
+def test_aligner_moves_source_onto_target(kind):
+    """A shifted, rescaled copy of the target cloud is mapped back onto it."""
+    import eval as ev
+
+    rng = np.random.default_rng(0)
+    d = 512
+    tgt = ev._unit(rng.normal(size=(4000, d)) * 0.05 + rng.normal(size=d) * 0.2)
+    offset = rng.normal(size=d) * 0.3
+    src = ev._unit(tgt[:2000] * 1.5 + offset)                  # same faces, shifted domain
+    align = ev.make_aligner(kind, src, tgt)
+    before = float(np.mean(src @ ev._unit(tgt.mean(0))))
+    after = float(np.mean(align(src) @ ev._unit(tgt.mean(0))))
+    own = float(np.mean(tgt @ ev._unit(tgt.mean(0))))
+    assert after > before and abs(after - own) < abs(before - own) / 2
+    assert np.allclose(np.linalg.norm(align(src), axis=1), 1.0, atol=1e-5)
+
+
 def test_commercial_config_loads():
     from train import load_config
 

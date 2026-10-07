@@ -8,6 +8,20 @@ References: held-out "val" faces from the dataset (default) and/or image folders
 (--refs, repeatable). Score = AuraFace cosine between each generated face and
 its reference. Writes <out>/eval/scores.csv, summary.json and one sheet per
 prompt (rows = references; columns = reference | each mode).
+
+Vector alignment (--align, mode "ours" only): an adapter trained on synthetic
+faces sees real faces' vectors from outside its training cloud. --align maps
+each reference vector from the --align-src distribution (real faces: a built
+dataset folder or a folder of photos) onto the --align-tgt one (the training
+set) before it enters the adapter:
+    mean   v' = unit(v - mean_src + mean_tgt)
+    coral  v' = unit((v - mean_src) C_src^-1/2 C_tgt^1/2 + mean_tgt)
+           (covariances shrunk toward the identity when the source is small)
+Scores are still taken against the ORIGINAL vectors.
+
+    python eval.py --config configs/commercial.yaml --paths-from configs/gpu.yaml --data data/faces_sfhq \
+        --adapter checkpoints/commercial/step-0017500/faceid_aura_sd15.safetensors --modes ours \
+        --refs <visitors> --align coral --align-src <real photos or dataset> --align-tgt data/faces_sfhq
 """
 
 import argparse
@@ -38,6 +52,53 @@ def references(cfg, refs, n_val):
     for folder in refs:
         out += sorted(p for p in Path(folder).iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
     return out
+
+
+_IMG = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def _unit(x):
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-8)
+
+
+def vector_set(path, aura, limit=20000, seed=0):
+    """Unit AuraFace vectors of a built dataset folder (embeds.npy) or of every
+    image under a folder of photos."""
+    p = Path(path)
+    if (p / "embeds.npy").exists():
+        emb = np.load(p / "embeds.npy").astype(np.float32)
+        if len(emb) > limit:
+            emb = emb[np.random.default_rng(seed).choice(len(emb), size=limit, replace=False)]
+        return _unit(emb)
+    vecs = [e for f in sorted(p.rglob("*")) if f.suffix.lower() in _IMG
+            for e in [aura.embed_path(f)[0]] if e is not None]
+    if not vecs:
+        raise SystemExit(f"no faces found under {p}")
+    return _unit(np.stack(vecs))
+
+
+def _sqrtm(c, inverse=False):
+    w, v = np.linalg.eigh(c)
+    w = np.clip(w, 1e-8, None)
+    return (v * (w ** (-0.5 if inverse else 0.5))) @ v.T
+
+
+def _cov(x):
+    """Covariance shrunk toward a scaled identity (a few hundred real photos
+    cannot pin down a 512x512 covariance on their own)."""
+    n, d = x.shape
+    s = np.cov(x, rowvar=False)
+    a = d / (n + d)
+    return (1 - a) * s + a * (np.trace(s) / d) * np.eye(d)
+
+
+def make_aligner(kind, src, tgt):
+    """v -> aligned unit vector, mapping the src distribution onto tgt."""
+    mu_s, mu_t = src.mean(0), tgt.mean(0)
+    if kind == "mean":
+        return lambda v: _unit(v - mu_s + mu_t)
+    m = _sqrtm(_cov(src), inverse=True) @ _sqrtm(_cov(tgt))
+    return lambda v: _unit((v - mu_s) @ m + mu_t)
 
 
 def pipeline(cfg, mode, adapter, dtype, device):
@@ -81,7 +142,13 @@ def main():
     ap.add_argument("--guidance", type=float, default=5.0)
     ap.add_argument("--data", help="dataset folder (overrides paths.data)")
     ap.add_argument("--out", help="output folder (overrides paths.out)")
+    ap.add_argument("--align", choices=["none", "mean", "coral"], default="none",
+                    help="map reference vectors onto the training distribution (mode 'ours')")
+    ap.add_argument("--align-src", help="real faces: dataset folder or photo folder (source statistics)")
+    ap.add_argument("--align-tgt", help="training set folder (target statistics), e.g. data/faces_sfhq")
     args = ap.parse_args()
+    if args.align != "none" and not (args.align_src and args.align_tgt):
+        raise SystemExit("--align needs --align-src and --align-tgt")
 
     cfg = load_config(args.config, {}, {"data": args.data, "out": args.out}, args.paths_from)
     cfg["paths"].setdefault("ip_adapter_dir", str((ROOT / "../am-ml-fullbody-sketch/dev/models/ip_adapter").resolve()))
@@ -101,6 +168,13 @@ def main():
         if e is not None:
             ref_emb[r] = e
     refs = list(ref_emb)
+    align = lambda v: v  # noqa: E731
+    if args.align != "none":
+        src, tgt = vector_set(args.align_src, aura), vector_set(args.align_tgt, aura)
+        align = make_aligner(args.align, src, tgt)
+        moved = np.mean([float(np.dot(align(ref_emb[r]), ref_emb[r])) for r in refs])
+        print(f"align {args.align}: src {len(src)} vectors, tgt {len(tgt)}; "
+              f"mean cosine(aligned, original) over references {moved:.3f}")
     out = Path(cfg["paths"]["out"]) / "eval"
     out.mkdir(parents=True, exist_ok=True)
     rows, images = [], {}
@@ -110,7 +184,7 @@ def main():
         pipe.set_ip_adapter_scale(args.scale)
         for r in refs:
             if mode == "ours":
-                pos = torch.from_numpy(ref_emb[r]).to(device, dtype)[None, None]
+                pos = torch.from_numpy(align(ref_emb[r]).astype(np.float32)).to(device, dtype)[None, None]
                 kw = {"ip_adapter_image_embeds": [torch.cat([torch.zeros_like(pos), pos])]}
             else:
                 kw = {"ip_adapter_image": Image.open(r).convert("RGB")}
@@ -140,6 +214,8 @@ def main():
         n = sum(1 for r in rows if r["mode"] == mode)
         summary[mode] = {"mean_cosine": round(float(np.mean(s)), 4) if s else None,
                          "face_found": f"{len(s)}/{n}"}
+    summary["_settings"] = {"adapter": args.adapter, "align": args.align, "align_src": args.align_src,
+                            "align_tgt": args.align_tgt, "scale": args.scale}
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     for pi in range(len(PROMPTS)):
         t = 192

@@ -94,6 +94,32 @@ def save_adapter(unet, path: str | Path, dtype=torch.float16) -> Path:
     return path
 
 
+def load_adapter(unet, path: str | Path) -> int:
+    """Copy saved adapter weights (h94 FaceID layout) into an adapter already
+    attached with `attach_adapter`: the warm start for a continued run. Shapes
+    and key counts must match exactly; returns the number of tensors loaded."""
+    from safetensors.torch import load_file
+    sd = split_state_dict(load_file(str(path)))
+    proj = unet.encoder_hid_proj.image_projection_layers[0]
+    proj_sd = {k.replace("proj.0", "ff.net.0.proj").replace("proj.2", "ff.net.2"): v
+               for k, v in sd["image_proj"].items()}
+    proj.load_state_dict(proj_sd, strict=True)        # raises on a token-count / size mismatch
+    procs = [p for p in unet.attn_processors.values() if isinstance(p, IPAdapterAttnProcessor2_0)]
+    want = {f"{1 + 2 * i}.{kv}.weight" for i in range(len(procs)) for kv in ("to_k_ip", "to_v_ip")}
+    if set(sd["ip_adapter"]) != want:
+        raise ValueError(f"{path}: ip_adapter keys do not match this UNet "
+                         f"({len(sd['ip_adapter'])} saved vs {len(want)} expected)")
+    with torch.no_grad():
+        for i, proc in enumerate(procs):
+            for kv in ("to_k_ip", "to_v_ip"):
+                w = sd["ip_adapter"][f"{1 + 2 * i}.{kv}.weight"]
+                dst = getattr(proc, kv)[0].weight
+                if w.shape != dst.shape:
+                    raise ValueError(f"{path}: {kv} of layer {i} is {tuple(w.shape)}, expected {tuple(dst.shape)}")
+                dst.copy_(w.to(dst.dtype))
+    return len(proj_sd) + len(want)
+
+
 def split_state_dict(flat: dict) -> dict:
     """Flat safetensors keys -> {"image_proj": {...}, "ip_adapter": {...}} (diffusers' in-memory form)."""
     sd = {"image_proj": {}, "ip_adapter": {}}

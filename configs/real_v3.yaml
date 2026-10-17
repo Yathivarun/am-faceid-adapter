@@ -1,0 +1,25 @@
+# Stage A (plan 2026-10): continue the research adapter on the SAME data and
+# recipe as poc.yaml (FFHQ + CelebA-HQ, 4 tokens, BLIP captions, no sketch
+# augmentation), warm-started from its step-50000 weights. One change only:
+# the LR schedule (warm-up after the warm start, then constant; cool-down
+# branches decay from kept states). Seed 43, since the 50k run used 42 and its
+# data order can't be replayed.
+#
+#   python train.py --config configs/real_v3.yaml --paths-from configs/gpu.yaml \
+#       --init-adapter checkpoints/poc/step-0050000/faceid_aura_sd15.safetensors --keep-state-at 75000
+base: poc.yaml
+
+paths:
+  out: checkpoints/real_v3
+
+train:
+  max_steps: 100000
+  seed: 43
+  lr_warmup: 1000        # fresh AdamW after the warm start
+  lr_decay_start: null   # main run: no decay; cool-down branches pass --decay-start
+  lr_decay_steps: 5000
+  lr_min: 0.0
+  keep_states_at: [75000]
+
+val:
+  sketch_prompt: "a pencil sketch portrait of a person, monochrome drawing"

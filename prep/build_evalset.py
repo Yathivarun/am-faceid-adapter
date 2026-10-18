@@ -13,8 +13,11 @@ count, detection score, box), the unit identity vector, and a sharpness score
     blurry         face-crop sharpness < 40
 Per person: `reg_fru_cos` (registration vs mean FRU vector) and the usable
 images (no flags). People whose own images disagree (reg_fru_cos < 0.25: wrong
-photo filed under the id) or who look like another id (mean-vector cosine >=
-0.6: registered twice) are flagged and dropped from both splits.
+photo filed under the id) are dropped. Ids that look like the same person
+(mean-vector cosine >= 0.6: registered more than once) are grouped; each group
+keeps ONE id (a dev id if the group has one, else the id with the most usable
+images) and the others are marked duplicate_of it, so no impostor is secretly
+the same person and nobody is lost.
 
 Splits: the ids in --dev (the dev set already used for the 2026-10-17 baseline)
 are "dev"; every other usable person is "test". Protocols in eval2.py:
@@ -129,14 +132,30 @@ def main():
     for i in ids:
         v = np.mean([vecs[p] for p in people[i]["usable"]["registration"] + people[i]["usable"]["fru"]], 0)
         means.append(v / np.linalg.norm(v))
-    dups = []
+    dups, parent = [], {i: i for i in ids}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
     if len(means) > 1:
         sims = np.stack(means) @ np.stack(means).T
         for a, b in zip(*np.where(np.triu(sims, 1) >= DUPLICATE_COS)):
             dups.append([ids[a], ids[b], round(float(sims[a, b]), 4)])
-            for i in (ids[a], ids[b]):
-                if "duplicate" not in people[i]["flags"]:
-                    people[i]["flags"].append("duplicate")
+            parent[find(ids[a])] = find(ids[b])
+    groups = {}
+    for i in ids:
+        groups.setdefault(find(i), []).append(i)
+    groups = [sorted(g) for g in groups.values() if len(g) > 1]
+    for g in groups:
+        n_usable = lambda i: len(people[i]["usable"]["registration"]) + len(people[i]["usable"]["fru"])  # noqa: E731
+        keep = max(g, key=lambda i: (i in dev and not people[i]["flags"], not people[i]["flags"], n_usable(i), i))
+        for i in g:
+            if i != keep:
+                people[i]["flags"].append("duplicate")
+                people[i]["duplicate_of"] = keep
 
     for i, p in people.items():
         ok = not p["flags"] and (p["protocols"]["reg2fru"] or p["protocols"]["fru2fru"])
@@ -159,6 +178,8 @@ def main():
         "image_flags": img_flags,
         "person_flags": {f: sum(f in p["flags"] for p in people.values())
                          for f in ("mismatch", "duplicate")},
+        "duplicate_groups": {"groups": len(groups), "ids": sum(map(len, groups)),
+                             "largest": max(map(len, groups)) if groups else 0},
         "duplicates": dups,
         "reg_fru_cos_mean": round(float(np.mean([p["reg_fru_cos"] for p in people.values()
                                                  if "reg_fru_cos" in p])), 4) if people else None,

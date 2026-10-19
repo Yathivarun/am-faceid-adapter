@@ -12,7 +12,10 @@ skips what is done).
 Modes: `ours`, `full-face`, `plus-face`, each optionally `@scale` (default
 --scale), and fusions `ours+full-face@s_ours,s_h94` / `ours+plus-face@...`
 (both adapters loaded together, diffusers multi-IP-Adapter). h94 inputs are a
-square face crop (2x the detected box); ours gets the input's AuraFace vector.
+square face crop (--crop-scale x the detected box, default 2.0); ours gets the
+input's AuraFace vector. CLIP-image adapters copy the crop's framing (2.0 shows
+hair and shoulders, so full-face draws a small face on a torso), hence the knob;
+a non-default crop is part of the mode name ("full-face@0.8~crop1.4").
 
 Protocols (from prep/build_evalset.py):
     reg2fru   input = registration photo; targets = the person's FRU images
@@ -250,6 +253,8 @@ def main():
     ap.add_argument("--baseline", help="mode to compare every other mode against (paired, per person)")
     ap.add_argument("--tag", help="label for our adapter in mode names, e.g. 75k -> 'ours[75k]'")
     ap.add_argument("--scale", type=float, default=0.8)
+    ap.add_argument("--crop-scale", type=float, default=2.0,
+                    help="h94 input crop = this x the detected face box (framing of the output)")
     ap.add_argument("--seeds", type=int, default=2)
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--guidance", type=float, default=5.0)
@@ -282,6 +287,9 @@ def main():
     cfg = load_config(args.config, {}, {}, args.paths_from)
     specs = [parse_mode(m, args.scale) for m in args.modes]
     names = [m.replace("ours", f"ours[{args.tag}]", 1) if (args.tag and "ours" in m) else m for m in args.modes]
+    if args.crop_scale != 2.0:
+        names = [n + f"~crop{args.crop_scale:g}" if any(p != "ours" for p in sp[1]) else n
+                 for n, sp in zip(names, specs)]
     if any("ours" in parts for _, parts, _ in specs) and not args.adapter:
         raise SystemExit("--adapter is required for modes with 'ours'")
 
@@ -312,7 +320,7 @@ def main():
                 "split": args.split, "protocol": args.protocol, "people": len({c[0] for c in todo}),
                 "inputs": len(todo), "adapter": args.adapter, "modes": args.modes, "seeds": args.seeds,
                 "steps": args.steps, "guidance": args.guidance, "prompts": PROMPTS, "negative": NEGATIVE,
-                "scorers": args.scorers, "h94_input": "square face crop, 2x detected box"}
+                "scorers": args.scorers, "h94_input": f"square face crop, {args.crop_scale:g}x detected box"}
     settings["tag"] = args.tag
     (out / f"settings{'-' + args.tag if args.tag else ''}.json").write_text(json.dumps(settings, indent=2))
     done = {(r["mode"], r["input"], r["prompt"], r["seed"]) for r in rows}
@@ -339,7 +347,7 @@ def main():
             cond_cache = {}
             for (person, inp, rec, targets, imp), prompt, seed in left:
                 if inp not in cond_cache:
-                    crop = square_crop(Image.open(inp).convert("RGB"), rec["box"])
+                    crop = square_crop(Image.open(inp).convert("RGB"), rec["box"], args.crop_scale)
                     cond_cache = {inp: condition(pipe, parts, aura_vec[inp], crop, device, dtype)}
                 img = pipe(PROMPTS[prompt], negative_prompt=NEGATIVE, num_inference_steps=args.steps,
                            guidance_scale=args.guidance, height=512, width=512,

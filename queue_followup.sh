@@ -40,6 +40,9 @@ step f_105k_A $EV --protocol reg2fru --out $OUTA --adapter $A105 --tag 105k --ba
 step f_50k_ext_A $EV --protocol reg2fru --out $OUTA --adapter $A50 --tag 50k --baseline full-face \
   --modes ours+full-face@1.0,0.5 ours+full-face@0.8,0.7 ours+full-face@1.0,0.7
 
+# 1b. framing confound: tighter h94 crop (1.4x box = face only), so full-face draws a close-up too
+step f_crop_A $EV --protocol reg2fru --out $OUTA --adapter $A105 --tag 105k --baseline full-face --crop-scale 1.4   --modes full-face@0.8 full-face@0.5 ours+full-face@0.8,0.5 ours+full-face@0.6,0.3
+
 # 2. second protocol for the leaders
 step f_fullB $EV --protocol fru2fru --out $OUTB --modes full-face@0.5 --baseline full-face
 step f_105k_B $EV --protocol fru2fru --out $OUTB --adapter $A105 --tag 105k --baseline full-face \
